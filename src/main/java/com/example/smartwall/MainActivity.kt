@@ -32,13 +32,11 @@ import java.io.FileOutputStream
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
-// Ultra-Fast Helper with RAM Pre-loading & Exact Screen Size Cropping
 object WallpaperRepo {
     private const val PREFS_NAME = "wall_prefs"
     private const val KEY_AUTO_ENABLED = "auto_enabled"
     private const val KEY_QUEUE_INDEX = "queue_index"
 
-    // Pre-loaded Next Wallpaper in RAM for 0ms delay on Screen Off
     @Volatile
     private var preloadedBytes: ByteArray? = null
     @Volatile
@@ -51,7 +49,6 @@ object WallpaperRepo {
         return dir
     }
 
-    // Sorted Newest First (Most recently saved at index 0)
     fun getSavedFiles(context: Context): List<File> {
         val files = getWallpaperDir(context).listFiles() ?: return emptyList()
         return files.filter { it.isFile }.sortedByDescending {
@@ -93,29 +90,24 @@ object WallpaperRepo {
         return BitmapFactory.decodeFile(file.absolutePath, decodeOptions)
     }
 
-    // Center-crops image to exact phone screen resolution so Android never zooms or scales it
+    // Perfect 9:16 and mobile screen aspect ratio fit via center cropping
     fun cropAndCompressToScreenSize(context: Context, rawBitmap: Bitmap): ByteArray {
         val metrics = context.resources.displayMetrics
         val screenW = metrics.widthPixels
         val screenH = metrics.heightPixels
 
-        val cropped = if (rawBitmap.width == screenW && rawBitmap.height == screenH) {
-            rawBitmap
-        } else {
-            ThumbnailUtils.extractThumbnail(
-                rawBitmap,
-                screenW,
-                screenH,
-                ThumbnailUtils.OPTIONS_RECYCLE_INPUT
-            )
-        }
+        val cropped = ThumbnailUtils.extractThumbnail(
+            rawBitmap,
+            screenW,
+            screenH,
+            ThumbnailUtils.OPTIONS_RECYCLE_INPUT
+        )
 
         val out = ByteArrayOutputStream()
-        cropped.compress(Bitmap.CompressFormat.JPEG, 92, out)
+        cropped.compress(Bitmap.CompressFormat.JPEG, 100, out)
         return out.toByteArray()
     }
 
-    // Pre-loads the NEXT wallpaper into RAM so it applies instantly when screen turns off
     fun preloadNextInRam(context: Context) {
         try {
             val files = getSavedFiles(context)
@@ -127,18 +119,12 @@ object WallpaperRepo {
             val nextIdx = getQueueIndex(context) % files.size
             val targetFile = files[nextIdx]
 
-            if (preloadedFilePath == targetFile.absolutePath && preloadedBytes != null) {
-                return
-            }
+            if (preloadedFilePath == targetFile.absolutePath && preloadedBytes != null) return
 
             val metrics = context.resources.displayMetrics
             val bmp = decodeOptimizedBitmap(targetFile, metrics.widthPixels, metrics.heightPixels)
             if (bmp != null) {
                 val exactBytes = cropAndCompressToScreenSize(context, bmp)
-                // Also overwrite old uncropped file once so future loads are raw file reads
-                if (bmp.width != metrics.widthPixels || bmp.height != metrics.heightPixels) {
-                    FileOutputStream(targetFile).use { it.write(exactBytes) }
-                }
                 preloadedBytes = exactBytes
                 preloadedFilePath = targetFile.absolutePath
             } else {
@@ -150,8 +136,8 @@ object WallpaperRepo {
         }
     }
 
-    // Instant Lock Screen rotation using preloaded RAM stream (No PNG re-encoding, No Zoom)
-    fun applyNextLockWallpaperFast(context: Context) {
+    // Applies automatically to BOTH Home Screen and Lock Screen simultaneously
+    fun applyNextWallpapersFast(context: Context) {
         if (!isApplying.compareAndSet(false, true)) return
         try {
             val files = getSavedFiles(context)
@@ -169,12 +155,15 @@ object WallpaperRepo {
             }
 
             val wm = WallpaperManager.getInstance(context)
-            // setStream with allowBackup=false is 10x faster than setBitmap and eliminates flicker
+            // Apply to Lock Screen
             ByteArrayInputStream(bytes).use { stream ->
                 wm.setStream(stream, null, false, WallpaperManager.FLAG_LOCK)
             }
+            // Apply to Home Screen (System)
+            ByteArrayInputStream(bytes).use { stream ->
+                wm.setStream(stream, null, false, WallpaperManager.FLAG_SYSTEM)
+            }
 
-            // Advance queue and immediately preload the NEXT wallpaper into RAM
             val nextIndex = (currentIndex + 1) % files.size
             setQueueIndex(context, nextIndex)
             preloadNextInRam(context)
@@ -185,7 +174,6 @@ object WallpaperRepo {
         }
     }
 
-    // Manual apply for Home Screen or Lock Screen
     fun applyWallpaperManual(context: Context, file: File, flag: Int): Boolean {
         return try {
             val metrics = context.resources.displayMetrics
@@ -216,9 +204,7 @@ class MainActivity : AppCompatActivity() {
     private val pickWallpapersLauncher = registerForActivityResult(
         ActivityResultContracts.GetMultipleContents()
     ) { uris: List<Uri> ->
-        if (uris.isNotEmpty()) {
-            saveSelectedImages(uris)
-        }
+        if (uris.isNotEmpty()) saveSelectedImages(uris)
     }
 
     private val notifPermLauncher = registerForActivityResult(
@@ -265,7 +251,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         autoSwitch = SwitchMaterial(this).apply {
-            text = "Auto-Change Lock Screen (Instant Mode)"
+            text = "Auto-Change Home & Lock Screen"
             textSize = 15f
             setTextColor(Color.WHITE)
             isChecked = WallpaperRepo.isAutoEnabled(this@MainActivity)
@@ -275,11 +261,7 @@ class MainActivity : AppCompatActivity() {
                     WallpaperRepo.setQueueIndex(this@MainActivity, 0)
                     ioExecutor.execute { WallpaperRepo.preloadNextInRam(this@MainActivity) }
                     startLockService()
-                    Toast.makeText(
-                        this@MainActivity,
-                        "Instant Lock Screen Mode Active!",
-                        Toast.LENGTH_SHORT
-                    ).show()
+                    Toast.makeText(this@MainActivity, "Auto Home & Lock Enabled!", Toast.LENGTH_SHORT).show()
                 } else {
                     stopLockService()
                 }
@@ -289,7 +271,7 @@ class MainActivity : AppCompatActivity() {
         card.addView(autoSwitch)
 
         queueStatusText = TextView(this).apply {
-            text = "Home Screen is strictly Manual-Only."
+            text = "Both Home and Lock will auto-change."
             textSize = 12f
             setTextColor(Color.parseColor("#38BDF8"))
             setPadding(0, 8, 0, 0)
@@ -308,32 +290,22 @@ class MainActivity : AppCompatActivity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply { setMargins(0, 28, 0, 24) }
             layoutParams = params
-            setOnClickListener {
-                pickWallpapersLauncher.launch("image/*")
-            }
+            setOnClickListener { pickWallpapersLauncher.launch("image/*") }
         }
         root.addView(saveBtn)
 
         val recycler = RecyclerView(this).apply {
             layoutManager = GridLayoutManager(this@MainActivity, 3)
-            layoutParams = LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                0,
-                1f
-            )
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
         }
-        adapter = WallpaperAdapter { file, position ->
-            showWallpaperOptionsDialog(file, position)
-        }
+        adapter = WallpaperAdapter { file, position -> showWallpaperOptionsDialog(file, position) }
         recycler.adapter = adapter
         root.addView(recycler)
 
         setContentView(root)
 
         ioExecutor.execute { WallpaperRepo.preloadNextInRam(this) }
-        if (WallpaperRepo.isAutoEnabled(this)) {
-            startLockService()
-        }
+        if (WallpaperRepo.isAutoEnabled(this)) startLockService()
     }
 
     override fun onResume() {
@@ -341,12 +313,10 @@ class MainActivity : AppCompatActivity() {
         refreshList()
     }
 
-    // Saves images pre-cropped to exact screen size for instant 0-zoom switching
     private fun saveSelectedImages(uris: List<Uri>) {
-        Toast.makeText(this, "Optimizing & Saving ${uris.size} wallpaper(s)...", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "Optimizing 9:16 & Saving...", Toast.LENGTH_SHORT).show()
         ioExecutor.execute {
             val dir = WallpaperRepo.getWallpaperDir(this)
-            val metrics = resources.displayMetrics
             var baseTime = System.currentTimeMillis()
 
             for (uri in uris) {
@@ -370,7 +340,7 @@ class MainActivity : AppCompatActivity() {
             WallpaperRepo.setQueueIndex(this, 0)
             WallpaperRepo.preloadNextInRam(this)
             mainHandler.post {
-                Toast.makeText(this, "Saved ${uris.size} wallpaper(s)!", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Saved successfully!", Toast.LENGTH_SHORT).show()
                 refreshList()
             }
         }
@@ -378,52 +348,25 @@ class MainActivity : AppCompatActivity() {
 
     private fun showWallpaperOptionsDialog(file: File, position: Int) {
         val options = arrayOf(
-            "Set on Home Screen (Manual Only)",
-            "Set on Lock Screen Now",
+            "Set on Home Screen Only",
+            "Set on Lock Screen Only",
+            "Set on Both Screens Now",
             "Remove / Delete Wallpaper"
         )
         AlertDialog.Builder(this)
             .setTitle("Wallpaper #${position + 1}")
             .setItems(options) { _, which ->
                 when (which) {
-                    0 -> {
-                        Toast.makeText(this, "Setting Home Screen...", Toast.LENGTH_SHORT).show()
-                        ioExecutor.execute {
-                            val ok = WallpaperRepo.applyWallpaperManual(
-                                this,
-                                file,
-                                WallpaperManager.FLAG_SYSTEM
-                            )
-                            mainHandler.post {
-                                Toast.makeText(
-                                    this,
-                                    if (ok) "Home Screen Updated!" else "Failed to set",
-                                    Toast.LENGTH_SHORT
-                                ).show()
-                            }
-                        }
-                    }
-                    1 -> {
-                        Toast.makeText(this, "Setting Lock Screen...", Toast.LENGTH_SHORT).show()
-                        ioExecutor.execute {
-                            val ok = WallpaperRepo.applyWallpaperManual(
-                                this,
-                                file,
-                                WallpaperManager.FLAG_LOCK
-                            )
-                            WallpaperRepo.setQueueIndex(this, position + 1)
-                            WallpaperRepo.preloadNextInRam(this)
-                            mainHandler.post {
-                                Toast.makeText(
-                                    this,
-                                    if (ok) "Lock Screen Updated!" else "Failed to set",
-                                    Toast.LENGTH_SHORT
-                                ).show()
-                                refreshList()
-                            }
-                        }
-                    }
+                    0 -> applyManual(file, WallpaperManager.FLAG_SYSTEM, "Home Screen Updated!")
+                    1 -> applyManual(file, WallpaperManager.FLAG_LOCK, "Lock Screen Updated!")
                     2 -> {
+                        ioExecutor.execute {
+                            WallpaperRepo.applyWallpaperManual(this, file, WallpaperManager.FLAG_SYSTEM)
+                            WallpaperRepo.applyWallpaperManual(this, file, WallpaperManager.FLAG_LOCK)
+                            mainHandler.post { Toast.makeText(this, "Both Screens Updated!", Toast.LENGTH_SHORT).show() }
+                        }
+                    }
+                    3 -> {
                         file.delete()
                         ioExecutor.execute { WallpaperRepo.preloadNextInRam(this) }
                         Toast.makeText(this, "Wallpaper Removed", Toast.LENGTH_SHORT).show()
@@ -434,25 +377,33 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    private fun applyManual(file: File, flag: Int, msg: String) {
+        Toast.init
+        Toast.makeText(this, "Applying...", Toast.LENGTH_SHORT).show()
+        ioExecutor.execute {
+            val ok = WallpaperRepo.applyWallpaperManual(this, file, flag)
+            mainHandler.post {
+                Toast.makeText(this, if (ok) msg else "Failed to set", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
     private fun refreshList() {
         val files = WallpaperRepo.getSavedFiles(this)
         val nextIndex = if (files.isEmpty()) 0 else WallpaperRepo.getQueueIndex(this) % files.size
-        countText.text = "Saved Wallpapers: ${files.size} (Order: Most Recently Saved First)"
+        countText.text = "Saved Wallpapers: ${files.size} (Newest First)"
         queueStatusText.text = if (files.isEmpty()) {
-            "Save wallpapers to start queue. Home Screen stays manual."
+            "Save wallpapers to start auto-rotation."
         } else {
-            "Ready in RAM -> Next Lock Screen: Wallpaper #${nextIndex + 1}"
+            "Next Auto-Change (Home & Lock): Wallpaper #${nextIndex + 1}"
         }
         adapter.submitList(files, nextIndex)
     }
 
     private fun startLockService() {
         val intent = Intent(this, WallpaperLockService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(intent)
-        } else {
-            startService(intent)
-        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent)
+        else startService(intent)
     }
 
     private fun stopLockService() {
@@ -489,10 +440,7 @@ class WallpaperAdapter(
             setBackgroundColor(Color.parseColor("#1E293B"))
         }
         val imageView = ImageView(ctx).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
+            layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             scaleType = ImageView.ScaleType.CENTER_CROP
         }
         val badgeView = TextView(ctx).apply {
@@ -519,7 +467,7 @@ class WallpaperAdapter(
         holder.img.setImageBitmap(null)
 
         if (position == nextQueueIndex) {
-            holder.badge.text = "#${position + 1} • READY"
+            holder.badge.text = "#${position + 1} • NEXT"
             holder.badge.setBackgroundColor(Color.parseColor("#E62563EB"))
         } else {
             holder.badge.text = "#${position + 1}"
@@ -535,17 +483,13 @@ class WallpaperAdapter(
                 if (bmp != null) {
                     cache.put(file.absolutePath, bmp)
                     mainHandler.post {
-                        if (holder.img.tag == file.absolutePath) {
-                            holder.img.setImageBitmap(bmp)
-                        }
+                        if (holder.img.tag == file.absolutePath) holder.img.setImageBitmap(bmp)
                     }
                 }
             }
         }
 
-        holder.container.setOnClickListener {
-            onClick(file, position)
-        }
+        holder.container.setOnClickListener { onClick(file, position) }
     }
 }
 
@@ -561,7 +505,7 @@ class WallpaperLockService : Service() {
                 bgExecutor.execute {
                     try {
                         Process.setThreadPriority(Process.THREAD_PRIORITY_DISPLAY)
-                        WallpaperRepo.applyNextLockWallpaperFast(context)
+                        WallpaperRepo.applyNextWallpapersFast(context)
                     } finally {
                         pendingResult.finish()
                     }
@@ -586,16 +530,15 @@ class WallpaperLockService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 channelId,
-                "Lock Screen Wallpaper Auto-Changer",
+                "Auto Wallpaper Changer",
                 NotificationManager.IMPORTANCE_LOW
             )
-            val nm = getSystemService(NotificationManager::class.java)
-            nm.createNotificationChannel(channel)
+            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
 
         val notif = NotificationCompat.Builder(this, channelId)
-            .setContentTitle("Instant Lock Wallpaper Active")
-            .setContentText("Next wallpaper pre-loaded in RAM for instant switch")
+            .setContentTitle("Auto Home & Lock Wallpaper Active")
+            .setContentText("Changing both screens turn-by-turn")
             .setSmallIcon(android.R.drawable.ic_menu_gallery)
             .setOngoing(true)
             .build()
@@ -607,14 +550,10 @@ class WallpaperLockService : Service() {
         }
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        return START_STICKY
-    }
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
 
     override fun onDestroy() {
-        try {
-            unregisterReceiver(screenReceiver)
-        } catch (_: Exception) {}
+        try { unregisterReceiver(screenReceiver) } catch (_: Exception) {}
         super.onDestroy()
     }
 
