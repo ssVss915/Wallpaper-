@@ -90,7 +90,6 @@ object WallpaperRepo {
         return BitmapFactory.decodeFile(file.absolutePath, decodeOptions)
     }
 
-    // Perfect 9:16 and mobile screen aspect ratio fit via center cropping
     fun cropAndCompressToScreenSize(context: Context, rawBitmap: Bitmap): ByteArray {
         val metrics = context.resources.displayMetrics
         val screenW = metrics.widthPixels
@@ -136,7 +135,6 @@ object WallpaperRepo {
         }
     }
 
-    // Applies automatically to BOTH Home Screen and Lock Screen simultaneously
     fun applyNextWallpapersFast(context: Context) {
         if (!isApplying.compareAndSet(false, true)) return
         try {
@@ -155,11 +153,9 @@ object WallpaperRepo {
             }
 
             val wm = WallpaperManager.getInstance(context)
-            // Apply to Lock Screen
             ByteArrayInputStream(bytes).use { stream ->
                 wm.setStream(stream, null, false, WallpaperManager.FLAG_LOCK)
             }
-            // Apply to Home Screen (System)
             ByteArrayInputStream(bytes).use { stream ->
                 wm.setStream(stream, null, false, WallpaperManager.FLAG_SYSTEM)
             }
@@ -378,7 +374,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun applyManual(file: File, flag: Int, msg: String) {
-        Toast.init
         Toast.makeText(this, "Applying...", Toast.LENGTH_SHORT).show()
         ioExecutor.execute {
             val ok = WallpaperRepo.applyWallpaperManual(this, file, flag)
@@ -419,7 +414,7 @@ class WallpaperAdapter(
     private var nextQueueIndex: Int = 0
     private val executor = Executors.newFixedThreadPool(4)
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val cache = LruCache<String, Bitmap>(150)
+    private val cache = LruCache<String, Bitmap>(30)
 
     fun submitList(newItems: List<File>, nextIndex: Int) {
         items = newItems
