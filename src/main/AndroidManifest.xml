@@ -1,15 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.example.smartwall">
 
+    <!-- Sirf Wallpaper set karne ki permission chahiye -->
     <uses-permission android:name="android.permission.SET_WALLPAPER" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:allowBackup="true"
-        android:icon="@android:drawable/ic_menu_gallery"
-        android:label="Smart Wallpaper"
+        android:label="SmartWall"
         android:supportsRtl="true"
         android:theme="@style/Theme.MaterialComponents.DayNight.NoActionBar">
 
@@ -22,15 +20,18 @@
             </intent-filter>
         </activity>
 
+        <!-- System ki tarah chupchap chalne wali Service (No Notification, No 1 Active App) -->
         <service
             android:name=".WallpaperLockService"
             android:enabled="true"
-            android:exported="false"
-            android:foregroundServiceType="specialUse">
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Auto-rotate lock screen wallpaper when screen turns off and on" />
+            android:exported="true"
+            android:label="SmartWall Auto Changer"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
         </service>
 
     </application>
 </manifest>
+
