@@ -1,10 +1,9 @@
 package com.example.smartwall
 
-import android.Manifest
+import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.app.*
 import android.content.*
-import android.content.pm.PackageManager
-import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
@@ -12,15 +11,15 @@ import android.graphics.Typeface
 import android.media.ThumbnailUtils
 import android.net.Uri
 import android.os.*
+import android.provider.Settings
 import android.util.LruCache
 import android.view.Gravity
 import android.view.ViewGroup
+import android.view.accessibility.AccessibilityEvent
 import android.widget.*
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.app.NotificationCompat
-import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.button.MaterialButton
@@ -74,6 +73,14 @@ object WallpaperRepo {
     fun setQueueIndex(context: Context, index: Int) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit().putInt(KEY_QUEUE_INDEX, index).apply()
+    }
+
+    fun isAccessibilityServiceEnabled(context: Context): Boolean {
+        val enabledServices = Settings.Secure.getString(
+            context.contentResolver,
+            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        ) ?: return false
+        return enabledServices.contains(context.packageName)
     }
 
     fun decodeOptimizedBitmap(file: File, maxWidth: Int, maxHeight: Int): Bitmap? {
@@ -203,20 +210,8 @@ class MainActivity : AppCompatActivity() {
         if (uris.isNotEmpty()) saveSelectedImages(uris)
     }
 
-    private val notifPermLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { _ -> }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
-                != PackageManager.PERMISSION_GRANTED
-            ) {
-                notifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-            }
-        }
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -250,16 +245,31 @@ class MainActivity : AppCompatActivity() {
             text = "Auto-Change Home & Lock Screen"
             textSize = 15f
             setTextColor(Color.WHITE)
-            isChecked = WallpaperRepo.isAutoEnabled(this@MainActivity)
+            isChecked = WallpaperRepo.isAutoEnabled(this@MainActivity) &&
+                    WallpaperRepo.isAccessibilityServiceEnabled(this@MainActivity)
+
             setOnCheckedChangeListener { _, isChecked ->
-                WallpaperRepo.setAutoEnabled(this@MainActivity, isChecked)
                 if (isChecked) {
-                    WallpaperRepo.setQueueIndex(this@MainActivity, 0)
-                    ioExecutor.execute { WallpaperRepo.preloadNextInRam(this@MainActivity) }
-                    startLockService()
-                    Toast.makeText(this@MainActivity, "Auto Home & Lock Enabled!", Toast.LENGTH_SHORT).show()
+                    if (!WallpaperRepo.isAccessibilityServiceEnabled(this@MainActivity)) {
+                        AlertDialog.Builder(this@MainActivity)
+                            .setTitle("Enable System Service")
+                            .setMessage("Bina '1 active app' aur bina notification ke chalane ke liye Accessibility Settings -> Installed Apps -> SmartWall Auto Changer ko ON karein.")
+                            .setPositiveButton("Open Settings") { _, _ ->
+                                WallpaperRepo.setAutoEnabled(this@MainActivity, true)
+                                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                            }
+                            .setNegativeButton("Cancel") { _, _ ->
+                                this.isChecked = false
+                            }
+                            .show()
+                    } else {
+                        WallpaperRepo.setAutoEnabled(this@MainActivity, true)
+                        WallpaperRepo.setQueueIndex(this@MainActivity, 0)
+                        ioExecutor.execute { WallpaperRepo.preloadNextInRam(this@MainActivity) }
+                        Toast.makeText(this@MainActivity, "Auto Home & Lock Enabled!", Toast.LENGTH_SHORT).show()
+                    }
                 } else {
-                    stopLockService()
+                    WallpaperRepo.setAutoEnabled(this@MainActivity, false)
                 }
                 refreshList()
             }
@@ -299,13 +309,14 @@ class MainActivity : AppCompatActivity() {
         root.addView(recycler)
 
         setContentView(root)
-
         ioExecutor.execute { WallpaperRepo.preloadNextInRam(this) }
-        if (WallpaperRepo.isAutoEnabled(this)) startLockService()
     }
 
     override fun onResume() {
         super.onResume()
+        val isServiceReady = WallpaperRepo.isAutoEnabled(this) &&
+                WallpaperRepo.isAccessibilityServiceEnabled(this)
+        autoSwitch.isChecked = isServiceReady
         refreshList()
     }
 
@@ -394,16 +405,6 @@ class MainActivity : AppCompatActivity() {
         }
         adapter.submitList(files, nextIndex)
     }
-
-    private fun startLockService() {
-        val intent = Intent(this, WallpaperLockService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent)
-        else startService(intent)
-    }
-
-    private fun stopLockService() {
-        stopService(Intent(this, WallpaperLockService::class.java))
-    }
 }
 
 class WallpaperAdapter(
@@ -488,7 +489,7 @@ class WallpaperAdapter(
     }
 }
 
-class WallpaperLockService : Service() {
+class WallpaperLockService : AccessibilityService() {
 
     private val bgExecutor = Executors.newSingleThreadExecutor()
 
@@ -509,9 +510,11 @@ class WallpaperLockService : Service() {
         }
     }
 
-    override fun onCreate() {
-        super.onCreate()
-        startForegroundNotification()
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        serviceInfo = AccessibilityServiceInfo().apply {
+            feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
+        }
         bgExecutor.execute { WallpaperRepo.preloadNextInRam(this) }
         val filter = IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_OFF)
@@ -520,37 +523,12 @@ class WallpaperLockService : Service() {
         registerReceiver(screenReceiver, filter)
     }
 
-    private fun startForegroundNotification() {
-        val channelId = "smart_wall_lock_channel"
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                channelId,
-                "Auto Wallpaper Changer",
-                NotificationManager.IMPORTANCE_LOW
-            )
-            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
-        }
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
 
-        val notif = NotificationCompat.Builder(this, channelId)
-            .setContentTitle("Auto Home & Lock Wallpaper Active")
-            .setContentText("Changing both screens turn-by-turn")
-            .setSmallIcon(android.R.drawable.ic_menu_gallery)
-            .setOngoing(true)
-            .build()
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(101, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
-        } else {
-            startForeground(101, notif)
-        }
-    }
-
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+    override fun onInterrupt() {}
 
     override fun onDestroy() {
         try { unregisterReceiver(screenReceiver) } catch (_: Exception) {}
         super.onDestroy()
     }
-
-    override fun onBind(intent: Intent?): IBinder? = null
 }
